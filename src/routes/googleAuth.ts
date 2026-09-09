@@ -191,9 +191,25 @@ router.post("/auth/google/login", async (req, res) => {
       "Google user signed in",
     );
 
-    // Always send the user to our app server with the access token in the URL:
-    // http://192.168.1.4:8000?accesstoken=ya29...
-    res.redirect(303, postLoginRedirectUrl(token));
+    // The caller is a fetch/XHR from an HTTPS page, so a server-side redirect
+    // cannot navigate the browser (and an HTTPS->HTTP redirect is blocked as
+    // mixed content). Hand the URL back and let the front-end navigate:
+    //   window.location.href = data.redirectUrl;  // -> http://192.168.1.4:8000?accesstoken=ya29...
+    res.json({
+      authenticated: true,
+      redirectUrl: postLoginRedirectUrl(token),
+      token,
+      user: {
+        id: userInfo.sub,
+        email: userInfo.email,
+        emailVerified: userInfo.email_verified === true,
+        name: userInfo.name ?? null,
+        givenName: userInfo.given_name ?? null,
+        familyName: userInfo.family_name ?? null,
+        picture: userInfo.picture ?? null,
+        locale: userInfo.locale ?? null,
+      },
+    });
   } catch (error) {
     req.log.error({ err: error }, "Google token login failed");
     res.status(500).json({ authenticated: false, error: "Google login failed" });
