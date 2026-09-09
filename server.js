@@ -15,18 +15,26 @@ const {
   NODE_ENV = 'development',
 } = process.env;
 
-if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+if (!GOOGLE_CLIENT_ID) {
   console.error(
-    'Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.\n' +
-      'Copy .env.example to .env and fill in the credentials from Google Cloud Console.'
+    'Missing GOOGLE_CLIENT_ID.\n' +
+      'Copy .env.example to .env and fill in the client ID from Google Cloud Console.'
   );
   process.exit(1);
+}
+
+// The browser token flow (POST /auth/google/token) needs the client ID only.
+// The redirect / authorization-code flow additionally needs the secret.
+const codeFlowEnabled = Boolean(GOOGLE_CLIENT_SECRET);
+if (!codeFlowEnabled) {
+  console.warn('No GOOGLE_CLIENT_SECRET set — the redirect code flow is disabled.');
 }
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/userinfo';
 const REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
+const TOKENINFO_ENDPOINT = 'https://oauth2.googleapis.com/tokeninfo';
 
 const SCOPES = ['openid', 'email', 'profile'];
 
@@ -57,6 +65,7 @@ function sweepPendingLogins() {
 
 const app = express();
 app.use(cookieParser());
+app.use(express.json({ limit: '8kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const cookieOptions = {
@@ -74,6 +83,7 @@ function currentSession(req) {
 
 // Step 1: send the user to Google's consent screen.
 app.get('/auth/google', (req, res) => {
+  if (!codeFlowEnabled) return res.status(501).send('Redirect flow disabled: no GOOGLE_CLIENT_SECRET.');
   sweepPendingLogins();
 
   const state = base64url(crypto.randomBytes(24));
@@ -152,6 +162,75 @@ app.get('/auth/google/callback', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).send('Unexpected error during the OAuth exchange.');
+  }
+});
+
+// The client ID the browser needs to start the Google token flow.
+app.get('/api/config', (req, res) => {
+  res.json({ clientId: GOOGLE_CLIENT_ID, scopes: SCOPES });
+});
+
+// SSO login as a POST: the browser sends the Google access token (ya29....) in the body.
+//
+//   POST /auth/google/token
+//   Content-Type: application/json
+//   { "access_token": "ya29.a0AfH6SM..." }
+//
+// The token is NOT trusted as-is. It is validated at Google's tokeninfo endpoint and the
+// audience must be this app's own client ID — otherwise any site could take a token its
+// own users granted it and replay it here to log in as them.
+app.post('/auth/google/token', async (req, res) => {
+  const accessToken = req.body?.access_token;
+
+  if (typeof accessToken !== 'string' || !accessToken) {
+    return res.status(400).json({ error: 'missing_access_token' });
+  }
+  if (!accessToken.startsWith('ya29.')) {
+    // Google OAuth 2.0 access tokens carry this prefix; an id_token (JWT, "eyJ...")
+    // sent here by mistake would fail validation below anyway.
+    return res.status(400).json({ error: 'not_a_google_access_token' });
+  }
+
+  try {
+    const infoRes = await fetch(
+      `${TOKENINFO_ENDPOINT}?access_token=${encodeURIComponent(accessToken)}`
+    );
+    const info = await infoRes.json();
+
+    if (!infoRes.ok) {
+      return res.status(401).json({ error: 'invalid_token', details: info.error_description });
+    }
+    if (info.aud !== GOOGLE_CLIENT_ID) {
+      // Token was minted for a different application — reject it.
+      console.warn('Rejected access token issued to another audience:', info.aud);
+      return res.status(401).json({ error: 'audience_mismatch' });
+    }
+    if (info.expires_in !== undefined && Number(info.expires_in) <= 0) {
+      return res.status(401).json({ error: 'expired_token' });
+    }
+
+    const userinfoRes = await fetch(USERINFO_ENDPOINT, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const profile = await userinfoRes.json();
+    if (!userinfoRes.ok) {
+      return res.status(502).json({ error: 'userinfo_failed' });
+    }
+
+    const sessionId = base64url(crypto.randomBytes(32));
+    sessions.set(sessionId, {
+      profile,
+      accessToken,
+      refreshToken: null,
+      scope: info.scope,
+      expiresAt: Date.now() + Number(info.expires_in || 3600) * 1000,
+    });
+
+    res.cookie('sid', sessionId, { ...cookieOptions, maxAge: 24 * 60 * 60 * 1000 });
+    res.status(200).json({ authenticated: true, profile: { sub: profile.sub, email: profile.email } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'token_validation_failed' });
   }
 });
 
