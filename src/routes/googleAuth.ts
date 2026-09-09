@@ -191,30 +191,9 @@ router.post("/auth/google/login", async (req, res) => {
       "Google user signed in",
     );
 
-    const redirectUrl = postLoginRedirectUrl(token);
-
-    // A plain browser navigation (form post) is redirected straight to our
-    // server; a fetch/XHR caller gets the URL back and navigates itself.
-    if (req.accepts(["json", "html"]) === "html") {
-      res.redirect(303, redirectUrl);
-      return;
-    }
-
-    res.json({
-      authenticated: true,
-      redirectUrl,
-      token,
-      user: {
-        id: userInfo.sub,
-        email: userInfo.email,
-        emailVerified: userInfo.email_verified === true,
-        name: userInfo.name ?? null,
-        givenName: userInfo.given_name ?? null,
-        familyName: userInfo.family_name ?? null,
-        picture: userInfo.picture ?? null,
-        locale: userInfo.locale ?? null,
-      },
-    });
+    // Always send the user to our app server with the access token in the URL:
+    // http://192.168.1.4:8000?accesstoken=ya29...
+    res.redirect(303, postLoginRedirectUrl(token));
   } catch (error) {
     req.log.error({ err: error }, "Google token login failed");
     res.status(500).json({ authenticated: false, error: "Google login failed" });
