@@ -48,6 +48,22 @@ function codeChallengeFor(verifier) {
   return base64url(crypto.createHash('sha256').update(verifier).digest());
 }
 
+// Decode a JWT (header + payload) WITHOUT verifying its signature. This is only
+// for surfacing the ID token's claims in the UI (issuer, audience, subject,
+// email, expiry). A relying party that trusts the JWT must still verify the
+// signature against Google's JWKS and check iss/aud/exp before believing it.
+function decodeJwt(jwt) {
+  if (typeof jwt !== 'string') return null;
+  const parts = jwt.split('.');
+  if (parts.length < 3) return null;
+  try {
+    const part = (p) => JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    return { header: part(parts[0]), payload: part(parts[1]) };
+  } catch {
+    return null;
+  }
+}
+
 function sweepPendingLogins() {
   const cutoff = Date.now() - TEN_MINUTES;
   for (const [state, entry] of pendingLogins) {
@@ -141,7 +157,12 @@ app.get('/auth/google/callback', async (req, res) => {
     const sessionId = base64url(crypto.randomBytes(32));
     sessions.set(sessionId, {
       profile,
+      // Two credentials Google issues at login, for two kinds of consumers:
+      //  - accessToken: OAuth 2.0 bearer token, for calling Google/resource APIs.
+      //  - idToken: the OIDC JWT (a signed identity assertion), for relying
+      //    parties that verify the token itself instead of calling an API.
       accessToken: tokens.access_token,
+      idToken: tokens.id_token || null,
       refreshToken: tokens.refresh_token || null,
       scope: tokens.scope,
       expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
@@ -160,13 +181,17 @@ app.get('/api/me', (req, res) => {
   const session = currentSession(req);
   if (!session) return res.status(401).json({ authenticated: false });
 
-  const { profile, expiresAt, scope, accessToken } = session;
+  const { profile, expiresAt, scope, accessToken, idToken } = session;
   res.json({
     authenticated: true,
     profile,
-    token: {
-      // Only a prefix — the full access token stays on the server.
-      preview: `${accessToken.slice(0, 12)}…`,
+    // Return BOTH credentials so either style of relying party can consume it:
+    // some verify the access token (call the API), some verify the ID token JWT.
+    tokens: {
+      accessToken,
+      idToken: idToken || null,
+      idTokenClaims: decodeJwt(idToken),
+      tokenType: 'Bearer',
       scope,
       expiresAt: new Date(expiresAt).toISOString(),
       expiresInSeconds: Math.max(0, Math.round((expiresAt - Date.now()) / 1000)),

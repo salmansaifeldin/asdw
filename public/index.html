@@ -61,12 +61,22 @@
       .name { font-weight: 600; }
       .muted { color: var(--muted); font-size: 13px; }
       pre {
-        margin: 16px 0 0;
+        margin: 6px 0 0;
         padding: 12px;
         border-radius: 8px;
         background: color-mix(in srgb, var(--fg) 6%, var(--card));
         overflow-x: auto;
         font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .label {
+        margin-top: 16px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
       }
       .row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
       button.plain {
@@ -100,6 +110,7 @@
 
       function renderSignedIn(data) {
         const p = data.profile;
+        const t = data.tokens || {};
         app.innerHTML = `
           <div class="card">
             <div class="who">
@@ -109,20 +120,28 @@
                 <div class="muted">${p.email ?? ''}${p.email_verified ? ' · verified' : ''}</div>
               </div>
             </div>
-            <pre id="detail">${JSON.stringify(
-              { subject: p.sub, accessToken: data.token },
-              null,
-              2
-            )}</pre>
+
+            <div class="label">Access token · OAuth 2.0 bearer</div>
+            <pre>${t.accessToken ?? '(none)'}</pre>
+
+            <div class="label">ID token · JWT (OIDC)</div>
+            <pre>${t.idToken ?? '(none)'}</pre>
+
+            <div class="label">ID token claims · decoded, not verified</div>
+            <pre>${JSON.stringify(t.idTokenClaims?.payload ?? {}, null, 2)}</pre>
+
             <div class="row">
-              <button class="plain" id="call">Call Google API with the token</button>
+              <button class="plain" id="call">Call Google API with the access token</button>
               <button class="plain" id="logout">Sign out</button>
             </div>
+            <pre id="detail" hidden></pre>
           </div>`;
 
         document.getElementById('call').onclick = async () => {
           const res = await fetch('/api/google/userinfo');
-          document.getElementById('detail').textContent = JSON.stringify(await res.json(), null, 2);
+          const detail = document.getElementById('detail');
+          detail.hidden = false;
+          detail.textContent = JSON.stringify(await res.json(), null, 2);
         };
         document.getElementById('logout').onclick = async () => {
           await fetch('/logout', { method: 'POST' });
